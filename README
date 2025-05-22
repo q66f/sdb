@@ -1,0 +1,59 @@
+sdb - stardict browser
+
+use a good dict like
+https://github.com/reader-dict/monolingual
+dont forget to gunzip .dict.dz to .dict
+
+unlike sdcv, sdb support space in searched word, ie
+'think piece' in sdcv will be searched as think and piece even being quoted in shell
+that's a BUG. sdb dont do that. you can search the single word 'think piece'.
+
+Do not handle dictzip, you should gunzip .dict.dz to .dict
+Do not handle regexp, html
+Do not support dict larger than 4GiB
+Do not support image, audio or multiple text sametypesequence
+Segfault when a lot -ddict supplied, change dflag = bufoff if need
+	because i dont need all these
+	also im a unskilled programmer and have no enengy to do some stuff.
+	(gumbo-parser is fine to work with thou)
+
+supported:
+
+- .syn
+- .off: .idx, .syn offset cache
+- latin1 accent fold, unicode case fold, ascii case fuzzy match
+- read pattern from stdin (useless, because of not handling html
+
+# .syn 's optimization
+
+format of single item
+.idx <=255 word| \0| 4 .dict offset| 4 .dict word size
+.syn <=255 word| \0| 4 nth word in .idx
+
+converting the "nth word" into offset,size located at corresponding .idx item
+is hard to optimize.
+
+do preconverting and writing to .syo or
+do like .off but instead of 1 per 64 offset also writing all of them to .ful
+and some other plans are abandoned
+
+# .off spec
+
+n*4 offset to .idx, .syn word start
+in machine endian
+
+while n = 2+(wordcount-1)/Pagesize, 2 for 0 and offset of last word
+Pagesize = 64
+
+# .oft spec revealed by sdcv's source code
+
+30 "StarDict's Cache, Version: 0.2"| 4 0x51a4d1c1| n*4 offset to word start
+in machine endian (0x51a4d1c1 is too)
+
+while n = 2+(wordcount-1)/ENTR_PER_PAGE, 2 for 0 and end byte.
+ENTR_PER_PAGE = 32
+
+i dont feel happy about its not including last word's offset but calcing runtime.
+
+Public domain.
+9front portions are under MIT license.
