@@ -1,6 +1,17 @@
 /* https://stardict-4.sourceforge.net/StarDictFileFormat */
 /* https://man.9front.org/2/rune */
 
+#define _GNU_SOURCE
+#include <ftw.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #define nil NULL
 #include "sdb.h"
 
@@ -10,30 +21,29 @@
 static const char *cflag;
 static const char **dflag;
 static s8int ndflag;
-static bool aflag;
-static bool fflag;
-static bool lflag;
+static bool aflag; /* suppress accent fold */
+static bool fflag; /* suppress fuzzy ascii case */
+static bool lflag; /* unicode case fold */
 
 typedef struct Dict Dict;
-typedef struct Off Off;
-typedef struct Key Key;
+typedef struct Offset Offset;
+typedef struct Extent Extent;
 
 struct Dict {
-  char *path;
   u8int npath; /* length of base.off */
   u8int ntype; /* sametypesequence */
   u32int nidx; /* .idx word count */
   u32int nsyn; /* .syn word count */
 };
 
-struct Off {
+struct Offset {
   u32int npage; /* total page count, equals to 2+(wordcount-1)/Pagesize, 2 for 0 and offset of last word */
-  u32int *off;  /* offset to page begining */
+  u32int *offset;  /* offset to page begining */
 };
 
-struct Key {
-  u32int off;
+struct Extent {
   u32int size;
+  u32int offset;
 };
 
 enum {
@@ -46,19 +56,22 @@ enum {
   Wordsize = 256,
   Idxseek = 9,
   Synseek = 5,
-  Keysize = 8, /* dynamic array? */
+  Extentsize = 8, /* dynamic array? */
 };
 
+static size_t capacity;
+static off_t *ifosize;
+static char **path;
 static Dict *dict;
 static int *fdict;  /* fd */
-static u8int ndict; /* matched dict number */
+static size_t ndict; /* matched dict number */
 
-static Off *off;
-static int *foff; /* fd */
-static u8int noff; /* essentially the number of matched idx (equal to ndict) and syn */
+static Offset *offset;
+static int *foffset; /* fd to .idx .syn */
+static u8int noffset; /* essentially the number of matched idx (equal to ndict) and syn */
 
-static Key *key;
-static u8int nkey; /* matched key number */
+static Extent *extent;
+static u8int nextent; /* matched extent number */
 
 static char *pagebuf;
 static u16int *pageoff;
@@ -99,27 +112,28 @@ static void usage(void) {
            "    --      Stop option parsing\n");
 }
 
-static void cd(void) {
-  if (!cflag) {
-    char *p = getenv("XDG_DATA_HOME");
-    if (p == nil) {
-      p = getenv("HOME");
-      if (p == nil)
-        goto noenv;
-      memcpy(p + strlen(p), "/.local/share", 14);
-    }
-    memcpy(p + strlen(p), "/stardict/dic", 14);
-    if (chdir(p) == 0)
-      return;
-  noenv:
-    cflag = "/usr/share/stardict/dic";
+/* no symlink support */
+static int filter(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
+  if (ftwbuf->level > 2) {
+    if (typeflag == FTW_D) return FTW_SKIP_SUBTREE;
+    return 0;
   }
-  if (chdir(cflag) == -1)
-    sysfatal("chdir %s: %r", cflag);
-}
 
-static int fil(const struct dirent *p) {
-  return !memcmp(p->d_name + strlen(p->d_name) - 4, ".ifo", 4);
+  if (typeflag != FTW_F) return 0;
+  if (ndict >= capacity) {
+    capacity = (capacity == 0) ? 16 : capacity * 2;
+    path = realloc(path, capacity * sizeof(char *));
+    ifosize = realloc(ifosize, capacity * sizeof(off_t *));
+    if (!path) return -1;
+  }
+    
+  if(memcmp(fpath + strlen(fpath) - 4, ".ifo", 4) == 0) {
+    size_t l = strlen(fpath);
+    path[ndict] = malloc(l + 5); /* .idx.off\0 or .dict.dz\0 minus .ifo */
+    memcpy(path[ndict], fpath, l+1);
+    ifosize[ndict++] = sb->st_size;
+  }
+  return 0;
 }
 
 static bool matchdflag(char *v, u16int nv) {
@@ -133,36 +147,43 @@ static bool matchdflag(char *v, u16int nv) {
 }
 
 static void readifo(void) {
-  u8int n;
-  int i, fd;
-  struct dirent **p;
-  struct stat st;
-  char *buf, *tem, *val;
+  size_t i = 0, nhole = 0;
+  int fd;
+  char *key, *tem, *val;
   u16int nval;
+  bool freebuf = false;
+  char *tempbuf;
 
-  if (!(n = scandir(".", &p, fil, alphasort)))
-    sysfatal("scandir .ifo: none, %r");
-  dict = malloc(n * sizeof(Dict));
+  dict = malloc(ndict * sizeof(Dict));
+  key = pagebuf;
 
-  for (i = 0, buf = pagebuf; i < n; i++, dict++) {
-    if ((fd = open(p[i]->d_name, O_RDONLY)) == -1)
-      sysfatal("open %s: %r", p[i]->d_name);
-    fstat(fd, &st);
+  while(i < ndict) {
+    if (nhole)
+      *path = *(path + nhole);
+    if ((fd = open(*path, O_RDONLY)) == -1)
+      sysfatal("open %s: %r", *path);
 
-    if (st.st_size < Entrysize * Pagesize)
-      buf = calloc(1, st.st_size);
+    if (ifosize[i+nhole] > Entrysize * Pagesize) {
+      if (!freebuf) {
+        tempbuf = calloc(1, ifosize[i+nhole]);
+        freebuf = true;
+      } else {
+        tempbuf = realloc(key, ifosize[i+nhole]);
+      }
+      key = tempbuf;
+    }
 
     /* St.. + lf + version + lf = 39 */
     /* to deal with crlf */
-    if (pread(fd, buf, st.st_size - 38, 38) == -1 ||
-        (tem = memchr(buf, '\n', 3)) == nil)
-      sysfatal("inval %s\n", p[i]->d_name);
+    if (pread(fd, key, ifosize[i+nhole] - 38, 38) == -1 ||
+        (tem = memchr(key, '\n', 3)) == nil)
+      sysfatal("invalid %s\n", *path);
 
     dict->nsyn = 0;
     while (1) {
-      buf = tem + 1;
+      key = tem + 1;
       /* 17 's longest and newline's not allowed per spec */
-      if ((val = memchr(buf, '=', 17 + 4)) == nil)
+      if ((val = memchr(key, '=', 17 + 4)) == nil)
         break;
       *val++ = 0;
       if ((tem = strchr(val, '\n')) != nil) {
@@ -175,79 +196,83 @@ static void readifo(void) {
         tem = val + nval; /* for break */
       }
 
-      if (memcmp(buf, "bookname", 8) == 0) {
+      if (memcmp(key, "bookname", 8) == 0) {
         if (nval == 0)
-          sysfatal("%s no bookname\n", p[i]->d_name);
+          sysfatal("%s no bookname\n", *path);
         if (ndflag > 0 && matchdflag(val, nval) == 1) {
-          dict--;
+          ndict--;
+          nhole++;
+          free(*path);
           goto nextdict;
         } else if (ndflag == -1)
           write(1, val, nval);
-      } else if (memcmp(buf, "wordcount", 9) == 0) {
+      } else if (memcmp(key, "wordcount", 9) == 0) {
         dict->nidx = atol(val);
         if (dict->nidx < Pagesize)
-          sysfatal("%s has less 64 word\n", p[i]->d_name);
+          sysfatal("%s has less 64 word\n", *path);
         close(fd);
-      } else if (memcmp(buf, "synwordcount", 12) == 0) {
+      } else if (memcmp(key, "synwordcount", 12) == 0) {
         dict->nsyn = atol(val);
         if (dict->nsyn < Pagesize)
-          sysfatal("%s has less 64 word\n", p[i]->d_name);
-      } else if (memcmp(buf, "sametypesequence", 16) == 0) {
+          sysfatal("%s has less 64 word\n", *path);
+      } else if (memcmp(key, "sametypesequence", 16) == 0) {
         if (isupper(*val) || nval > 1)
-          sysfatal("%s sametypesequence type unsupported\n", p[i]->d_name);
+          sysfatal("%s sametypesequence type unsupported\n", *path);
         dict->ntype = 1;
-      } else if (memcmp(buf, "idxoffsetbits", 13) == 0)
+      } else if (memcmp(key, "idxoffsetbits", 13) == 0)
         if (memcmp(val, "64", 2) == 0)
           sysfatal("idxoffsetbits=64 unsupported");
     }
 
     if (ndflag != -1) {
-      dict->npath = strlen(p[i]->d_name);
-      dict->path = malloc(dict->npath + 5); /* .idx.off\0 or .dict.dz\0 minus .ifo */
-      memcpy(dict->path, p[i]->d_name, dict->npath - 3); /* base. without ifo */
-      ndict++;
+      dict->npath = strlen(*path);
       if (dict->nsyn)
-        noff++;
+        noffset++;
     } else
       printf("\t%u\t%u\n", dict->nidx, dict->nsyn);
+    i++;
+    path++;
+    dict++;
   nextdict:
     close(fd);
-    free(p[i]);
   }
   if (ndflag == -1)
     exit(0);
-  noff += ndict;
-  free(p);
+  if (ndict == 0)
+    sysfatal("no dict\n");
+  noffset += ndict;
+  if (freebuf) free(tempbuf);
+  free(ifosize);
 }
 
-static void genoff(u32int wc, struct stat st, u8int entryseek) {
+static int genoff(u32int wc, struct stat st, u8int entryseek) {
   int fd;
   u32int i, seek;
   u8int j;
   char *buf;
 
   buf = malloc(st.st_size);
-  if (read(*foff, buf, st.st_size) == -1) {
-    *(dict->path + dict->npath) = 0; /* base.idx"\0"off */ 
-    sysfatal("read %s: %r", dict->path);
+  if (read(*foffset, buf, st.st_size) == -1) {
+    *(*path + dict->npath) = 0; /* base.idx"\0"off */ 
+    sysfatal("read %s: %r", *path);
   }
 
-  *(off->off++) = 0;
-  for (i = seek = 0; i < off->npage - 2; i++) {
+  *(offset->offset++) = 0;
+  for (i = seek = 0; i < offset->npage - 2; i++) {
     for (j = 0; j < Pagesize; j++)
       seek += strlen(buf + seek) + entryseek;
-    *(off->off++) = seek;
+    *(offset->offset++) = seek;
   }
 
   for (i = 0; i < wc % Pagesize - 1; i++)
     seek += strlen(buf + seek) + entryseek;
-  *off->off = seek;
-  off->off -= off->npage - 1;
+  *offset->offset = seek;
+  offset->offset -= offset->npage - 1;
 
-  if ((fd = creat(dict->path, 0644)) == -1 ||
-      write(fd, off->off, off->npage * 4) == -1)
-    sysfatal("gen %s: %r", dict->path);
-  close(fd);
+  if ((fd = open(*path, O_RDWR | O_CREAT | O_TRUNC, 0644)) == -1 ||
+      write(fd, offset->offset, offset->npage * 4) == -1)
+    sysfatal("gen %s: %r", *path);
+  return fd;
 }
 
 /* https://github.com/projg2/portable-endianness */
@@ -259,28 +284,33 @@ static void readoff(u32int wc, int entryseek) {
   int fd;
   struct stat s, st;
 
-  off->npage = 2 + (wc - 1) / Pagesize;
-  off->off = malloc(off->npage * 4);
+  offset->npage = 2 + (wc - 1) / Pagesize;
+  offset->offset = malloc(offset->npage * 4);
 
-  if ((*foff = open(dict->path, O_RDONLY)) == -1)
-    sysfatal("open %s: %r", dict->path);
-  fstat(*foff, &st);
+  if ((*foffset = open(*path, O_RDONLY)) == -1) /* base.idx"\0"off */
+    sysfatal("open %s: %r", *path);
+  fstat(*foffset, &st);
 
-  *(dict->path + dict->npath) = '.'; /* base.idx'.'off */
-  if (access(dict->path, F_OK) == -1)
-    genoff(wc, st, entryseek);
+  *(*path + dict->npath) = '.'; /* base.idx'.'off */
 
-  if ((fd = open(dict->path, O_RDONLY)) == -1)
-    sysfatal("open %s: %r", dict->path);
+  if ((fd = open(*path, O_RDONLY)) == -1) {
+    if (errno == ENOENT)
+      fd = genoff(wc, st, entryseek);
+    else
+      sysfatal("open %s: %r", *path);
+  }
+restat:
   fstat(fd, &s);
-  if (s.st_mtime < st.st_mtime)
-    genoff(wc, st, entryseek);
-  foff++;
+  if (s.st_mtime < st.st_mtime) {
+    fd = genoff(wc, st, entryseek);
+    goto restat;
+  }
+  foffset++;
 
-  if (read(fd, off->off, s.st_size) == -1)
-    sysfatal("read %s: %r", dict->path);
+  if (pread(fd, offset->offset, s.st_size, 0) == -1)
+    sysfatal("read off %s: %r", *path);
   close(fd);
-  off++;
+  offset++;
 }
 
 /* do fuzzy matching instead of folding to the utf or latin1 is not possible because the way words are sorted */
@@ -294,8 +324,8 @@ static int cmp(char *w, char *p, u8int nw) {
 
 static char *getword(u32int offset) {
   /* read Wordsize+1 is bad but i dont wanna change it until regex is added */
-  if (pread(*foff, pagebuf, Wordsize, offset) == -1)
-    sysfatal("pread %s: %r", dict->path);
+  if (pread(*foffset, pagebuf, Wordsize, offset) == -1)
+    sysfatal("pread %s: %r", *path);
   return pagebuf;
 }
 
@@ -304,28 +334,28 @@ static void loadpage(u32int npage, u8int entryseek) {
   u32int *tem, i;
   u8int j;
 
-  tem = off->off + npage;
+  tem = offset->offset + npage;
   i = *tem;
-  pread(*foff, pagebuf, *(tem + 1) - i, i);
+  pread(*foffset, pagebuf, *(tem + 1) - i, i);
   /* last page size < Pageszie, but extra bytes barely used */
   for (i = j = 0; j < Pagesize; j++, i += strlen(pagebuf + i) + entryseek)
     *(pageoff + j) = i;
 }
 
-static void idxkey(char *w, u8int nw) {
+static void idxextent(char *w, u8int nw) {
   *(w + nw - 1) = ' ';
   write(1, w, nw);
 
-  key->off = readu32be((u8int *)w + nw);
-  key->size = readu32be((u8int *)w + nw + 4);
-  nkey++;
-  key++;
+  extent->offset = readu32be((u8int *)w + nw);
+  extent->size = readu32be((u8int *)w + nw + 4);
+  nextent++;
+  extent++;
 }
 
-static void synkey(char *w, u8int nw) {
-  key->size = readu32be((u8int *)w + nw);
-  nkey++;
-  key++;
+static void synextent(char *w, u8int nw) {
+  extent->size = readu32be((u8int *)w + nw);
+  nextent++;
+  extent++;
 }
 
 /* half way */
@@ -333,26 +363,26 @@ static void synkey(char *w, u8int nw) {
 static void idxdict(void) {
   u8int i, typeseek;
 
-  /* key-=nkey for match idxkey()'s print order */
-  for (i = 0, key -= nkey; i < nkey; i++, key++) {
-    if (key->size + 1 > Entrysize * Pagesize) /* newline */
-      pagebuf = malloc(key->size + 1);
-    pread(*fdict, pagebuf, key->size, key->off);
+  /* extent -= nextent for match idxextent()'s print order */
+  for (i = 0, extent -= nextent; i < nextent; i++, extent++) {
+    if (extent->size + 1 > Entrysize * Pagesize) /* newline */
+      pagebuf = malloc(extent->size + 1);
+    pread(*fdict, pagebuf, extent->size, extent->offset);
 
     if (dict->ntype == 1) {
       typeseek = 0;
     } else {
       if (isupper(*pagebuf))
-        sysfatal("%s sametypesequence type unsupported\n", dict->path);
+        sysfatal("%s sametypesequence type unsupported\n", *path);
       typeseek = 1;
-      key->size--; /* null terminator */
+      extent->size--; /* null terminator */
     }
     /* adding html support is easy, just how to do it good enough */
-    *(pagebuf + key->size) = '\n';
-    write(1, pagebuf + typeseek, key->size - typeseek + 1);
+    *(pagebuf + extent->size) = '\n';
+    write(1, pagebuf + typeseek, extent->size - typeseek + 1);
   }
-  key -= nkey;
-  nkey = 0;
+  extent -= nextent;
+  nextent = 0;
 }
 
 static void syndict(void) {
@@ -360,21 +390,21 @@ static void syndict(void) {
   u32int *tem, j;
   char *w;
 
-  for (i = 0, key -= nkey; i < nkey; i++, key++) {
-    tem = (off - 1)->off + (key->size / Pagesize);
+  for (i = 0, extent -= nextent; i < nextent; i++, extent++) {
+    tem = (offset - 1)->offset + (extent->size / Pagesize);
     j = *tem;
     /* foff - 1 is .idx, */
-    pread(*(foff - 1), pagebuf, *(tem + 1) - j, j);
+    pread(*(foffset - 1), pagebuf, *(tem + 1) - j, j);
     w = pagebuf;
-    for (j = 0; j < key->size % Pagesize; j++, w += strlen(w) + Idxseek)
+    for (j = 0; j < extent->size % Pagesize; j++, w += strlen(w) + Idxseek)
       ;
 
     j = strlen(w) + 1;
     *(w + j - 1) = '\n';
     write(1, w, j);
 
-    key->off = readu32be((u8int *)w + j);
-    key->size = readu32be((u8int *)w + j + 4);
+    extent->offset = readu32be((u8int *)w + j);
+    extent->size = readu32be((u8int *)w + j + 4);
   }
   idxdict();
 }
@@ -384,14 +414,14 @@ static void syndict(void) {
 /*
    search 1st word of each page,
    if the 1st word matched the the word we searching
-     if doing fuzzy matching (these might be multiple keys) check at least 4 words back and forth.
+     if doing fuzzy matching (these might be multiple extents) check at least 4 words back and forth.
      if not doing fuzzy matching, flush and return
    if its not matched, search the final page that the word may located at
    then if matched and fuzzy matching
    loop the whole page back and forth until failure or continue looping adjacent page
 */
 /* entryseek is Idxseek or Synseek */
-static void search(char *w, int entryseek, void (*savekey)(char *, u8int),
+static void search(char *w, int entryseek, void (*extentsave)(char *, u8int),
             void (*dictflush)(void), u8int nw) {
   u32int bot, mid, boo, mii;
   int res;
@@ -399,13 +429,13 @@ static void search(char *w, int entryseek, void (*savekey)(char *, u8int),
   u16int nwseek = nw - 1 + entryseek;
 
   if (cmp(w, getword(0), nw) < 0 ||
-      cmp(w, getword(*(off->off + off->npage - 1)), nw) > 0)
+      cmp(w, getword(*(offset->offset + offset->npage - 1)), nw) > 0)
     return;
 
   bot = 0;
-  mid = off->npage - 1; /* excluding the end word offset */
+  mid = offset->npage - 1; /* excluding the end word offset */
   while (mid > 1) {
-    res = cmp(w, getword(*(off->off + bot + mid / 2)), nw);
+    res = cmp(w, getword(*(offset->offset + bot + mid / 2)), nw);
     if (res > 0)
       bot += mid++ / 2;
     else if (res == 0) {
@@ -415,25 +445,25 @@ static void search(char *w, int entryseek, void (*savekey)(char *, u8int),
     mid /= 2;
   }
 
-  res = cmp(w, getword(*(off->off + bot)), nw);
+  res = cmp(w, getword(*(offset->offset + bot)), nw);
   if (res < 0)
     bot--;
   else if (res == 0) {
   page1stmatched:
-    savekey(pagebuf, nw);
+    extentsave(pagebuf, nw);
     if (!fflag) {
       if ((res = 4 * nwseek - Wordsize) > 0)
-        pread(*foff, pagebuf + Wordsize, res, *(off->off + bot) + Wordsize);
+        pread(*foffset, pagebuf + Wordsize, res, *(offset->offset + bot) + Wordsize);
 
-      for (buf = pagebuf + nwseek; nkey < 4; buf += nwseek)
+      for (buf = pagebuf + nwseek; nextent < 4; buf += nwseek)
         if (cmp(w, buf, nw) == 0)
-          savekey(buf, nw);
+          extentsave(buf, nw);
         else
           break;
-      pread(*foff, buf, 4 * nwseek, *(off->off + bot) - 4 * nwseek);
-      for (; nkey < 8; buf += nwseek)
+      pread(*foffset, buf, 4 * nwseek, *(offset->offset + bot) - 4 * nwseek);
+      for (; nextent < 8; buf += nwseek)
         if (cmp(w, buf, nw) == 0)
-          savekey(buf, nw);
+          extentsave(buf, nw);
         else
           break;
     }
@@ -444,7 +474,7 @@ static void search(char *w, int entryseek, void (*savekey)(char *, u8int),
   loadpage(bot, entryseek);
 
   /* not at the last page || page wordcount equals to Pagesize */
-  mid = mii = (bot != off->npage - 2 || dict->nidx % Pagesize == 0)
+  mid = mii = (bot != offset->npage - 2 || dict->nidx % Pagesize == 0)
                   ? Pagesize
                   : dict->nidx % Pagesize;
   boo = 0;
@@ -455,21 +485,21 @@ static void search(char *w, int entryseek, void (*savekey)(char *, u8int),
     else if (res == 0) {
       boo += mii / 2;
       buf = mnt = pagebuf + *(pageoff + boo);
-      savekey(buf, nw);
+      extentsave(buf, nw);
       if (!fflag) {
         mii = boo = boo + 1;
       pageloop:
         for (; mii < mid + 1; mii++)
           if (cmp(w, mnt += nwseek, nw) == 0)
-            savekey(mnt, nw);
+            extentsave(mnt, nw);
           else
             break;
         for (; boo > 1; boo--)
           if (cmp(w, buf -= nwseek, nw) == 0)
-            savekey(buf, nw);
+            extentsave(buf, nw);
           else
             break;
-        if (mii == mid + 1 && bot + 1 < off->npage) {
+        if (mii == mid + 1 && bot + 1 < offset->npage) {
           mii = 1;
           loadpage(bot + 1, entryseek);
           mnt = pagebuf + *pageoff;
@@ -482,15 +512,15 @@ static void search(char *w, int entryseek, void (*savekey)(char *, u8int),
           goto pageloop;
         }
       }
-      if (nkey > Keysize)
-        nkey = Keysize;
+      if (nextent > Extentsize)
+        nextent = Extentsize;
       dictflush();
       return;
     }
     mii /= 2;
   }
   if (cmp(w, buf = pagebuf + *(pageoff + boo), nw) == 0) {
-    savekey(buf, nw);
+    extentsave(buf, nw);
     dictflush();
   }
 }
@@ -528,14 +558,14 @@ static void sdb(char *w) {
   if (lflag)
     utflowcase(w);
   nw = strlen(w) + 1;
-  for (i = 0, off -= noff, foff -= noff, dict -= ndict, fdict -= ndict; i < ndict; i++, dict++, fdict++) {
-    search(w, Idxseek, idxkey, idxdict, nw);
-    off++;
-    foff++;
+  for (i = 0, offset -= noffset, foffset -= noffset, path -= ndict, dict -= ndict, fdict -= ndict; i < ndict; i++, dict++, fdict++) {
+    search(w, Idxseek, idxextent, idxdict, nw);
+    offset++;
+    foffset++;
     if (dict->nsyn > 0) {
-      search(w, Synseek, synkey, syndict, nw);
-      off++;
-      foff++;
+      search(w, Synseek, synextent, syndict, nw);
+      offset++;
+      foffset++;
     }
   }
 }
@@ -558,13 +588,13 @@ int main(int argc, char **argv) {
     ndflag++;
     break;
   case 'a':
-    aflag++; /* suppress accent fold */
+    aflag++;
     break;
   case 'f':
-    fflag++; /* suppress fuzzy ascii case */
+    fflag++;
     break;
   case 'l':
-    lflag++; /* unicode case fold */
+    lflag++;
     break;
   default:
     usage();
@@ -575,14 +605,35 @@ int main(int argc, char **argv) {
   char bufb[Entrysize * Pagesize] = {0};
   pagebuf = bufb;
 
-  cd();
+  if (!cflag) {
+      char *p = getenv("XDG_DATA_HOME"), *u = "/usr/share/stardict/dic";
+      if (p == nil) {
+        if ((p = getenv("HOME")) == nil)
+          goto noenv;
+        memcpy(p + strlen(p), "/.local/share", 14);
+      }
+      memcpy(p + strlen(p), "/stardict/dic", 14);
+
+    if (chdir(p) != 0) {
+    noenv:
+      if (chdir(u) != 0) {
+        sysfatal("chdir %s: %r", u);
+      }
+    } else if (nftw(u, filter, 16, FTW_PHYS) == -1)
+      if (errno != ENOENT)
+        sysfatal("nftw: %r");
+  } else if (chdir(cflag) == -1)
+    sysfatal("chdir %s: %r", cflag);
+
+  if (nftw(".", filter, 16, FTW_PHYS) == -1)
+    sysfatal("nftw: %r");
   readifo();
 
-  Off offb[noff];
-  int foffb[noff];
+  Offset offsetb[noffset];
+  int foffsetb[noffset];
   int fdictb[ndict];
-  off = offb;
-  foff = foffb;
+  offset = offsetb;
+  foffset = foffsetb;
   fdict = fdictb;
   /*
     very low stack size?
@@ -590,33 +641,33 @@ int main(int argc, char **argv) {
     foff = malloc(noff*sizeof(int));
     fdict = malloc(ndict*sizeof(int));
   */
-  Key keyb[Keysize];
-  key = keyb;
+  Extent extentb[Extentsize];
+  extent = extentb;
 
-  int i;
-  for (i = 0, dict -= ndict; i < ndict; i++, dict++, fdict++) {
+  size_t i;
+  for (i = 0, path -= ndict, dict -= ndict; i < ndict; i++, path++, dict++, fdict++) {
     /* base.idx\0off */
     /* in readoff first open .idx, then write '.' to \0, open .idx.off */
-    memcpy(dict->path + dict->npath - 3, "idx\0off", 8);
+    memcpy(*path + dict->npath - 3, "idx\0off", 8);
     readoff(dict->nidx, Idxseek);
     if (dict->nsyn) {
-      memcpy(dict->path + dict->npath - 3, "syn", 4);
+      memcpy(*path + dict->npath - 3, "syn", 4);
       readoff(dict->nsyn, Synseek);
     }
-    memcpy(dict->path + dict->npath - 3, "dict", 5);
-    // if ((*fdict = open(dict->path, O_RDONLY)) != -1)
+    memcpy(*path + dict->npath - 3, "dict", 5);
+    // if ((*fdict = open(*path, O_RDONLY)) != -1)
     //     break;
     // if (errno != ENOENT)
     //     goto err;
 
-    // memcpy(dict->path + dict->npath + 1, ".dz", 4);
-    if ((*fdict = open(dict->path, O_RDONLY)) == -1)
+    // memcpy(*path + dict->npath + 1, ".dz", 4);
+    if ((*fdict = open(*path, O_RDONLY)) == -1)
     // err:
-      sysfatal("open %s: %r", dict->path);
+      sysfatal("open %s: %r", *path);
   }
 
   if (argc != 0) {
-    for (i = 0; i < argc; i++)
+    for (i = 0; i < (unsigned)argc; i++)
       sdb(argv[i]);
     return 0;
   }
