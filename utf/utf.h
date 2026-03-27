@@ -9,13 +9,16 @@ enum {
 
 #include <stdint.h>
 
-typedef uint8_t  u8int;
-typedef uint16_t u16int;
-typedef uint32_t u32int;
-typedef int8_t  s8int;
-typedef int16_t s16int;
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int8_t  s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
 
-typedef u32int Rune;
+typedef u32 Rune;
 
 int chartorune(Rune *rune, const char *str);
 int runetochar(char *str, const Rune *rune);

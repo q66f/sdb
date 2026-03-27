@@ -12,7 +12,7 @@ sdb \- stardict browser
 .I dict
 ]
 [
-.B -afl
+.B -alsu
 ]
 [
 .B --
@@ -36,17 +36,18 @@ Use dictionaries in given dir.
 .TP
 .BI -d " dict"
 Use the given dictionary.
-A list of available dictionaries is printed by
-.BR -d .
 .TP
 .B -a
-Suppress latin1 accent fold of pattern.
-.TP
-.B -f
-Suppress ASCII case fuzzy match of pattern.
+Accurate accent matching (disable Latin-1 accent folding).
 .TP
 .B -l
-Do unicode case fold of pattern.
+Print a list of available dictionaries.
+.TP
+.B -s
+Strict case matching (disable case-insensitive search).
+.TP
+.B -u
+Unicode case folding.
 .TP
 .B --
 Stop option parsing.
@@ -57,12 +58,8 @@ Stop option parsing.
 .SH "SEE ALSO"
 .IR sdcv (1)
 .SH BUGS
-Do not handle dictzip, you should gunzip .dict.dz to .dict.
-.br
 Do not handle regexp, html.
 .br
 Do not support dict larger than 4GiB
 .br
 Do not support image, audio or multiple text sametypesequence.
-.br
-Segfault when a lot -ddict supplied, change dflag = bufoff if need .

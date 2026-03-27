@@ -10,7 +10,7 @@ utfnlen(const char *s, long m)
 
 	es = s + m;
 	for(n = 0; s < es; n++) {
-		c = *(const u8int*)s;
+		c = *(const u8*)s;
 		if(c < Runeself){
 			if(c == '\0')
 				break;

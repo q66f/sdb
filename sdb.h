@@ -1,37 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-#include "utf/utf.h"
-
-static char *argv0 = NULL;
-
-#include <errno.h>
-#include <stdarg.h>
-static inline void sysfatal(char *fmt, ...) {
-  if (argv0) {
-    write(2, argv0, strlen(argv0));
-    write(2, ": ", 2);
-  }
-
-  va_list ap;
-  u8int l = strlen(fmt) - 2;
-  va_start(ap, fmt);
-  if (memcmp(fmt + l, "%r", 2) == 0) {
-    char t[l + 1], *errstr;
-
-    memcpy(t, fmt, l);
-    *(t + l) = 0;
-    vfprintf(stderr, t, ap);
-    errstr = strerror(errno);
-    write(2, errstr, strlen(errstr));
-    write(2, "\n", 1);
-    exit(1);
-  }
-  vfprintf(stderr, fmt, ap);
-  exit(1);
-}
+static char *argv0 = nullptr;
 
 #define USED(x) ((void)(x))
 #define ARGBEGIN \
