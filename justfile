@@ -1,9 +1,13 @@
-@test *a:
+@default:
+    ninja --quiet -Cb
+    b/sdb -l
+    b/sdb -den str
+@t *a:
     ninja --quiet -Cb
     b/sdb {{a}}
-@st *a:
+@s *a:
     ninja --quiet -Cb
     strace b/sdb {{a}}
-@val *a:
+@v *a:
     ninja --quiet -Cb
-    valgrind --leak-check=full --track-origins=yes -q b/sdb {{a}}
+    valgrind --leak-check=full --track-origins=yes -q b/sdb -den str

@@ -4,8 +4,6 @@ use a good dict like
 https://github.com/reader-dict/monolingual
 
 Do not handle regexp, html
-Do not support dict larger than 4GiB
-Do not support image, audio or multiple text sametypesequence
 	because i dont use all these
 	also im a unskilled programmer and have no enengy to do some stuff.
 	(gumbo-parser is fine to work with thou)
@@ -31,7 +29,7 @@ i dont feel happy about its not including last word's offset but calcing runtime
 n*4 offsets to pages starts in index file
 in machine endian
 
-while n = 2+(wordcount-1)/Pagesize, 2 for 0 and offset of last word
+while n = 2+(wordcount-1)/ENTR_PER_PAGE, 2 for 0 and offset of last word
 ENTR_PER_PAGE = 64
 
 Public domain.

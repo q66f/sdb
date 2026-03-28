@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum {
 	Runeself = 0x80,
 	Runeerror = 0xfffd,
@@ -8,17 +12,7 @@ enum {
 };
 
 #include <stdint.h>
-
-typedef uint8_t  u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t  s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
-
-typedef u32 Rune;
+typedef uint32_t Rune;
 
 int chartorune(Rune *rune, const char *str);
 int runetochar(char *str, const Rune *rune);
@@ -36,3 +30,7 @@ int isspacerune(Rune c);
 int isdigitrune(Rune c);
 
 int utfnlen(const char *s, long m);
+
+#ifdef __cplusplus
+}
+#endif
