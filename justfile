@@ -1,13 +1,16 @@
+bin := "target/debug/sdb"
+
 @default:
-    ninja --quiet -Cb
-    b/sdb -l
-    b/sdb -den str
+    cargo build && ({{bin}} -l; {{bin}} -ctest -dtest64 apple; {{bin}} -den src)
+
+@b:
+    cargo build
+
 @t *a:
-    ninja --quiet -Cb
-    b/sdb {{a}}
+    cargo build && {{bin}} {{a}}
+
 @s *a:
-    ninja --quiet -Cb
-    strace b/sdb {{a}}
-@v *a:
-    ninja --quiet -Cb
-    valgrind --leak-check=full --track-origins=yes -q b/sdb -den str
+    cargo build && strace {{bin}} {{a}}
+
+@install:
+    RUSTFLAGS="-C strip=symbols" cargo install --path . --root /usr/local/

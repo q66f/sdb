@@ -2,7 +2,7 @@
 .SH NAME
 sdb \- stardict browser
 .SH SYNOPSIS
-.B b
+.B sdb
 [
 .B -c
 .I dir
@@ -12,7 +12,7 @@ sdb \- stardict browser
 .I dict
 ]
 [
-.B -alsu
+.B -alrsuD
 ]
 [
 .B --
@@ -26,7 +26,7 @@ is a stardict browser.
 If a
 .I pattern
 is given on the command line,
-.I b
+.I sdb
 prints all matching entries;
 otherwise it repeatedly accepts once a line as pattern.
 The options are
@@ -43,19 +43,23 @@ Accurate accent matching.
 .B -l
 Print a list of available dictionaries.
 .TP
+.B -r
+Use regex matching.
+.TP
 .B -s
 Strict case matching.
 .TP
 .B -u
-Unicode case folding.
+Unicode case lowercasing.
+.TP
+.B -D
+Disable html rendering.
 .TP
 .B --
 Stop option parsing.
 .SH FILES
 .B $XDG_DATA_HOME/stardict/dic
 .br
-.B /usr/lib/stardict/dic
+.B /usr/share/stardict/dic
 .SH "SEE ALSO"
 .IR sdcv (1)
-.SH BUGS
-Do not handle regexp, html.

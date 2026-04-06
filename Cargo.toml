@@ -1,0 +1,19 @@
+[package]
+name = "sdb"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = 'z'
+lto = 'thin'
+codegen-units = 1
+panic = 'abort'
+strip = true
+
+[dependencies]
+anyhow = "1.0.102"
+flate2 = "1.1.9"
+memchr = "2.8.0"
+memmap2 = "0.9.10"
+regex = "1.12.3"
+rustyline = "18.0.0"
