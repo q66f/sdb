@@ -2,8 +2,9 @@ use anyhow::{Result, ensure};
 use flate2::{Decompress, FlushDecompress};
 use memchr::memchr;
 use memmap2::Mmap;
-use std::fs::File;
 use std::path::Path;
+
+use crate::utils::try_mmap_file;
 
 #[derive(Default, Clone)]
 struct Cache {
@@ -26,7 +27,7 @@ pub struct Dictzip {
 
 impl Dictzip {
     pub fn new(path: &Path) -> Result<Self> {
-        let map = unsafe { Mmap::map(&File::open(path)?)? };
+        let map = try_mmap_file(path)?;
         ensure!(
             map.len() >= 18 && map.starts_with(b"\x1f\x8b") && map[3] & 0x04 != 0,
             "Invalid dictzip"
